@@ -1,6 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { PatternStore } from "./patternStore.js";
+import { PatternStore } from "./patternStorePostgres.js";
 import { Pattern, Episode } from "./types.js";
 
 // Optional: Define configuration schema to require configuration at connection time
@@ -8,18 +8,18 @@ export const configSchema = z.object({
   debug: z.boolean().default(false).describe("Enable debug logging"),
 });
 
-export default function createStatelessServer({
-  config,
-}: {
-  config: z.infer<typeof configSchema>;
-}) {
+// Initialize pattern store as a promise
+let patternStorePromise: Promise<PatternStore>;
+
+// Export the server creation function for Smithery
+export default function ({ sessionId, config }: { sessionId: string; config: z.infer<typeof configSchema> }) {
   const server = new McpServer({
     name: "Shelf Pattern Memory",
     version: "1.0.0",
   });
 
-  // Create pattern store instance
-  const patternStore = new PatternStore();
+  // Start pattern store initialization
+  patternStorePromise = PatternStore.create();
 
   // Tool: Search for relevant patterns
   server.tool(
@@ -30,6 +30,7 @@ export default function createStatelessServer({
       limit: z.number().optional().default(5).describe("Maximum number of patterns to return"),
     },
     async ({ context, limit }) => {
+      const patternStore = await patternStorePromise;
       const results = await patternStore.searchPatterns(context);
       const topResults = results.slice(0, limit);
       
@@ -57,6 +58,7 @@ export default function createStatelessServer({
       patternId: z.string().describe("ID of the pattern to apply"),
     },
     async ({ patternId }) => {
+      const patternStore = await patternStorePromise;
       const pattern = await patternStore.applyPattern(patternId);
       
       if (!pattern) {
@@ -90,6 +92,7 @@ export default function createStatelessServer({
       notes: z.string().optional().describe("Additional notes about the outcome"),
     },
     async ({ patternId, success, notes }) => {
+      const patternStore = await patternStorePromise;
       await patternStore.reinforcePattern(patternId, success);
       const pattern = await patternStore.getPattern(patternId);
       
@@ -119,6 +122,7 @@ export default function createStatelessServer({
     "List all available patterns",
     {},
     async () => {
+      const patternStore = await patternStorePromise;
       const patterns = await patternStore.getAllPatterns();
       
       const formatted = patterns
@@ -138,6 +142,60 @@ export default function createStatelessServer({
     }
   );
 
+  // Tool: Create a new pattern
+  server.tool(
+    "shelf_create_pattern",
+    "Create a new pattern to track a solution approach",
+    {
+      id: z.string().describe("Unique identifier for the pattern (e.g., 'caching-strategy', 'error-recovery')"),
+      name: z.string().describe("Human-readable name for the pattern"),
+      context: z.array(z.string()).describe("Contexts where this pattern applies"),
+      problem: z.string().describe("Problem this pattern solves"),
+      solution: z.string().describe("How the pattern solves the problem"),
+      confidence: z.number().optional().default(0.5).describe("Initial confidence in the pattern (0-1)"),
+    },
+    async ({ id, name, context, problem, solution, confidence }) => {
+      const patternStore = await patternStorePromise;
+      
+      // Check if pattern already exists
+      const existing = await patternStore.getPattern(id);
+      if (existing) {
+        return {
+          content: [{ 
+            type: "text", 
+            text: `⚠️ Pattern with ID '${id}' already exists. Use a different ID or update the existing pattern.` 
+          }],
+        };
+      }
+      
+      const pattern: Pattern = {
+        id,
+        name,
+        context,
+        problem,
+        solution,
+        examples: [],
+        relations: [],
+        confidence,
+        usageCount: 0,
+        createdAt: new Date(),
+      };
+      
+      await patternStore.savePattern(pattern);
+      
+      return {
+        content: [{ 
+          type: "text", 
+          text: `✅ Pattern created: ${name}\n` +
+                `ID: ${id}\n` +
+                `Problem: ${problem}\n` +
+                `Solution: ${solution}\n` +
+                `Confidence: ${(confidence * 100).toFixed(0)}%`
+        }],
+      };
+    }
+  );
+
   // Tool: Save episode
   server.tool(
     "shelf_save_episode",
@@ -146,9 +204,13 @@ export default function createStatelessServer({
       context: z.string().describe("Context of the interaction"),
       actions: z.array(z.string()).describe("Actions taken during the interaction"),
       outcome: z.string().describe("Outcome of the interaction"),
-      patternIds: z.array(z.string()).optional().describe("Patterns used in this episode"),
+      patternIds: z.array(z.string()).describe("IDs of patterns applied in this episode (required - at least one)"),
     },
     async ({ context, actions, outcome, patternIds }) => {
+      if (!patternIds || patternIds.length === 0) {
+        throw new Error("At least one pattern ID must be specified - an episode is an application of patterns");
+      }
+      
       const episode: Episode = {
         id: `ep-${Date.now()}`,
         timestamp: new Date(),
@@ -158,6 +220,7 @@ export default function createStatelessServer({
         patternIds,
       };
       
+      const patternStore = await patternStorePromise;
       await patternStore.saveEpisode(episode);
       
       return {
@@ -178,6 +241,7 @@ export default function createStatelessServer({
       limit: z.number().optional().default(3).describe("Maximum number of episodes to return"),
     },
     async ({ context, limit }) => {
+      const patternStore = await patternStorePromise;
       const episodes = await patternStore.findSimilarEpisodes(context, limit);
       
       if (episodes.length === 0) {
@@ -213,39 +277,40 @@ export default function createStatelessServer({
       problemStatement: z.string().describe("Description of the problem this pattern solves"),
     },
     async ({ episodeIds, patternName, problemStatement }) => {
+      const patternStore = await patternStorePromise;
       const pattern = await patternStore.extractPatternFromEpisodes(
         episodeIds,
         patternName,
         problemStatement
       );
-      
-      if (!pattern) {
-        return {
-          content: [{ 
-            type: "text", 
-            text: "Could not extract pattern. Need at least 2 valid episodes." 
-          }],
-        };
-      }
-
-      const relationsText = pattern.relations.length > 0
-        ? `\nRelated patterns: ${pattern.relations.map(r => r.patternId).join(', ')}`
-        : '';
-
+    
+    if (!pattern) {
       return {
         content: [{ 
           type: "text", 
-          text: `🎯 Pattern extracted: ${pattern.name}\n\n` +
-                `ID: ${pattern.id}\n` +
-                `Context: ${pattern.context.join(', ')}\n` +
-                `Problem: ${pattern.problem}\n` +
-                `Solution: ${pattern.solution}\n` +
-                `Initial confidence: ${(pattern.confidence * 100).toFixed(0)}%` +
-                relationsText
+          text: "Could not extract pattern. Need at least 2 valid episodes." 
         }],
       };
     }
+
+    const relationsText = pattern.relations.length > 0
+      ? `\nRelated patterns: ${pattern.relations.map(r => r.patternId).join(', ')}`
+      : '';
+
+    return {
+      content: [{ 
+        type: "text", 
+        text: `🎯 Pattern extracted: ${pattern.name}\n\n` +
+              `ID: ${pattern.id}\n` +
+              `Context: ${pattern.context.join(', ')}\n` +
+              `Problem: ${pattern.problem}\n` +
+              `Solution: ${pattern.solution}\n` +
+              `Initial confidence: ${(pattern.confidence * 100).toFixed(0)}%` +
+              relationsText
+      }],
+    };
+  }
   );
 
-  return server.server;
+  return server;
 }

@@ -4,7 +4,7 @@ import { Pattern, Episode } from './types.js';
 async function testPatternStore() {
   console.log('🧪 Testing Pattern Store...\n');
   
-  const store = new PatternStore();
+  const store = await PatternStore.create();
   
   // Test 1: Get all patterns
   console.log('1️⃣ Getting all patterns:');

@@ -30,7 +30,7 @@ export interface Episode {
   context: string;
   actions: string[];
   outcome: string;
-  patternIds?: string[];
+  patternIds: string[];  // Required - an episode is always an application of one or more patterns
 }
 
 export interface PatternSearchResult {
