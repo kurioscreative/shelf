@@ -1,0 +1,17 @@
+#!/usr/bin/env ruby
+
+require "fileutils"
+
+APP_ROOT = File.expand_path("..", __dir__)
+
+def system!(*args)
+  system(*args, exception: true)
+end
+
+FileUtils.chdir APP_ROOT do
+  # This script is a way to launch the MCP Inspector
+
+  puts "\n== Launching MCP Inspector =="
+  system! "npx @modelcontextprotocol/inspector"
+end
+
